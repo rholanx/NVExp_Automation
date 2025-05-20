@@ -5,7 +5,7 @@ import importlib.util
 import matplotlib.pyplot as plt
 import argparse
 from datetime import datetime
-sys.path.append(r"C:\\Users\\NVAFM_6th_fl_2\\NV-Automation\\b26_toolkit_for_agent\\b26_toolkit-master")
+sys.path.append(r'C:\Users\NVAFM_6th_fl_2\NV-Automation\b26_toolkit_for_agent\b26_toolkit-master')
 from pylabcontrol.core import Script
 from b26_toolkit.scripts.find_nv import FindNV
 

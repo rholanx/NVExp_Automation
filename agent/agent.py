@@ -8,6 +8,7 @@ from anthropic_engine import call_llm, call_vision  # Import both text and visio
 # from deepseek_engine import call_llm, call_vision  # Import both text and vision functions
 #from anthropic_engine import call_vision
 #from deepseek_engine import call_llm
+from rag_engine import embed_text, save_embeddings, load_embeddings, search_similar
 
 class NVExperimentAgent:
     def __init__(self):
@@ -25,8 +26,12 @@ class NVExperimentAgent:
         self.config_dir = os.path.join(self.base_dir, "configs")
         self.data_dir   = os.path.join(self.base_dir, "data")
         self.logs_dir   = os.path.join(self.base_dir, "logs")
-        self.naive_scripts_dir = "scripts"  # updated directory for scripts
-        self.scripts_dir = os.path.join(self.default_dir,self.naive_scripts_dir)
+
+        self.scripts_dir = "experiment_scripts"  # updated directory for scripts
+        
+        # Directory for storing embeddings
+        self.embeddings_dir = os.path.join(self.project_root_dir, self.project_name, "embeddings")
+        os.makedirs(self.embeddings_dir, exist_ok=True)
 
         # The entire conversation history (user messages, assistant messages, actions, etc.)
         self.conversation_history = []
@@ -62,30 +67,26 @@ You have the following constraints and abilities:
 In order to execute the script, you may use one of two cases. The first case is the default case, where there aren't any specific configs that the user wishes to change and you may simply read from the default base directories. In that case, follow the below instructions:
    
 3) Security & Directory Rules:
-   - Read Access: Only from the  `{self.default_dir}\\configs\\` or  `{self.default_dir}\\data\\` directories.
-   - Write Access: Only to the `{self.config_dir}\\` or `{self.data_dir}\\` directories.
+   - Read Access: Only from the `configs\\` or `data\\` directories.
+   - Write Access: Only to the `configs\\` or `data\\` directories.
    - Run Access: Only scripts in the `scripts\\` directory.
    - For `write`, `run`, or `vision` actions, always ask user permission first. If the user says “no,” do not proceed.
    
 4) Key File Paths & Self.base_dir:
    - All outputs, file paths, or results must be written to the directory {self.base_dir}.
    - Default case (when no new config file is specified): Use the following default file paths:
-     - `default_esr_config`: `{self.default_dir}\\configs\\default_esr_config.json`
+     - `default_esr_config`: `{self.default_dir}\\configsdefault_esr_config.json`
      - `default_find_nv_config`: `{self.default_dir}\\configs\\default_find_nv_config.json`
      - `default_galvo_scan_config`: `{self.default_dir}\\configs\\default_galvo_scan_config.json`
      - `default_optimize_config`: `{self.default_dir}\\configs\\default_optimize_config.json`
    
-5) Script Execution:
-   - The available scripts and their typical commands are:
-     - ESR:  
-       `py {self.default_dir}\\scripts\\ESR.py --config <config_file>`
-     - FindNV:  
-       `py {self.default_dir}\\scripts\\find_nv.py --config <config_file>`
-     - GalvoScan:  
-       `py {self.default_dir}\\scripts\\galvo_scan.py --config <config_file>`
-     - Optimize:  
-       `py {self.default_dir}\\scripts\\optimize.py --config <config_file>`
-   - Note: GalvoScan is a coarse search for NVs; FindNV is a refined version.
+5) Run Command Options:
+   - The run command must include one of the following four options: ESR, find_nv, galvo_scan, or optimize.
+   - IMPORTANT: You MUST include the --output-dir parameter in your command to specify where results should be saved.
+   - Always use the current run's data directory as the output directory: projects\\NVExperiment\\runs\\run_(insert TIMESTAMP here)\\data\\
+   - The complete command format should be:
+         py projects\\experiment_scripts\\<script_name>.py --config <config_file> --output-dir projects\\NVExperiment\\runs\\run_(insert TIMESTAMP here)\\data\\
+     where <script_name> is one of ESR, find_nv, galvo_scan, or optimize.
 
 6) Vision Option:
    - In addition to running scripts, you can analyze plot images.
@@ -106,11 +107,11 @@ In order to execute the script, you may use one of two cases. The first case is 
      - Non-default Case: Read the configuration from the new file path provided by the user.
    - Configuration Writing: 
      - Based on the reflection, write a new or updated configuration.
-     - Usual Case: Write to a new file under {self.base_dir} using default directory paths if no custom file is specified.
-     - Non-usual Case: Write to the user-specified configuration file path.
+     - Default Case: Write to a new file under {self.base_dir} using default directory paths if no custom file is specified.
+     - Non-default Case: Write to the user-specified configuration file path.
    - Experiment Execution: Run the desired experiment with:
      ```
-     py {self.default_dir}\\scripts\\<script_name>.py --config <config_file>
+     py {self.default_dir}\\scripts\\<script_name>.py --config <config_file> --output-dir projects\\NVExperiment\\runs\\run_(insert TIMESTAMP here)\\data\\
      ```
      where `<script_name>` is one of: `ESR`, `find_nv`, `galvo_scan`, or `optimize`.
 
@@ -145,12 +146,12 @@ In order to execute the script, you may use one of two cases. The first case is 
 
 10) Non-Default vs. Default Case Summary:
     - Default Case:  
-      - No new changes needed from the default config file.
+      - No new config file is provided by the user.
       - Use the default configuration files located in the `{self.default_dir}\\configs\\` directory.
       - New outputs and any created files should be within {self.base_dir}.
     - Non-Default Case:  
-      - The you think it's needed or the user requests updates to the config file.
-      - You should read and then generate a modified configuration to {self.base_dir}/configs\\.
+      - The user requests updates to the config file.
+      - You should read and then generate a modified configuration to {self.base_dir}\\configs\\.
       - All outputs are still directed to {self.base_dir}, but the config file operations occur at the new path within {self.base_dir}.
 
 11) Restrictions:
@@ -160,7 +161,7 @@ In order to execute the script, you may use one of two cases. The first case is 
         )
 
         os.makedirs(self.logs_dir, exist_ok=True)
-        # Get a file-safe timestamp
+        # Get a file-safe timestampc
         file_ts = self._current_timestamp_for_filename()
         self.logfile_path = os.path.join(self.logs_dir, f"agent_history_{file_ts}.log")
 
@@ -186,9 +187,50 @@ In order to execute the script, you may use one of two cases. The first case is 
 
     def _build_prompt(self) -> str:
         """
-        Combine system_instruction and conversation_history into a single prompt.
+        Combine system_instruction, RAG results, and conversation_history into a single prompt.
+        Also include suggestions for relevant plots.
         """
         prompt = self.system_instruction.strip()
+        
+        # Get the most recent user message for RAG query
+        recent_user_messages = [turn["content"] for turn in self.conversation_history 
+                               if turn["role"] == "user"]
+        
+        if recent_user_messages:
+            # Use the most recent user message as the query
+            query = recent_user_messages[-1]
+            
+            # RX 05142025
+            # Log that we're performing a RAG query
+            print(f"[RAG] Performing RAG query for: '{query[:50]}...' if len(query) > 50 else query")
+            
+            # Perform RAG search
+            relevant_contexts = self._get_rag_context(query)
+            
+            if relevant_contexts:
+                print(f"[RAG] Retrieved relevant context from previous conversations")
+                print(f"Retrieved context: {relevant_contexts}")
+                prompt += "\n\nRelevant context from previous conversations:\n"
+                prompt += relevant_contexts
+            else:
+                print("[RAG] No relevant context found in previous conversations")
+            
+            # Check for relevant plots
+            relevant_plots = self._get_relevant_plots(query)
+            if relevant_plots:
+                plot_filenames = [os.path.basename(p) for p in relevant_plots]
+                print(f"[RAG] Found relevant plots: {plot_filenames}")
+                self._log("rag", f"Relevant plots: {plot_filenames}")
+                
+                prompt += "\n\nRelevant plots that might help with this query:\n"
+                for plot_path in relevant_plots:
+                    plot_filename = os.path.basename(plot_path)
+                    prompt += f"- {plot_filename}\n"
+                prompt += "\nYou can analyze these plots using the 'vision' action if needed."
+            else:
+                print("[RAG] No relevant plots found")
+        
+        # Add conversation history
         for turn in self.conversation_history:
             role = turn["role"]
             content = turn["content"]
@@ -198,10 +240,12 @@ In order to execute the script, you may use one of two cases. The first case is 
                 prompt += f"\nAssistant: {content}"
             else:
                 prompt += f"\n{role.capitalize()}: {content}"
+        
         prompt += "\n\nPlease respond with a <think> block and any <action> blocks you need for the next step. Please carefully wait for user and experiment feedback before proceeding to too many actions."
         return prompt
 
     def ask_human_for_permission(self, description: str) -> bool:
+        #RX 05142025
         """
         Ask the user on the console for permission and log the response.
         """
@@ -217,15 +261,21 @@ In order to execute the script, you may use one of two cases. The first case is 
             "role": "user",
             "content": f"(permission) {ans}"
         })
+        ans = "yes"
         return (ans == "yes")
 
     def handle_user_input(self, user_message: str):
         """
         Process user prompt: log it, build the prompt, call the LLM, parse and execute actions.
         """
+        print(f"\n[Agent] Processing user input: '{user_message[:50]}{'...' if len(user_message) > 50 else ''}'")  
         self._log("user", user_message)
         self.conversation_history.append({"role": "user", "content": user_message})
+        
+        self._log("agent", "Building prompt with RAG context")
         full_prompt = self._build_prompt()
+        
+        print("[Agent] Calling LLM with enhanced prompt...")
         llm_response = call_llm(
             user_prompt=full_prompt,
             system_message=self.system_instruction,
@@ -313,7 +363,7 @@ In order to execute the script, you may use one of two cases. The first case is 
 
     def _action_read_file(self, filepath: str):
         """
-        Read a file from allowed directories (configs/ or data/).
+        Read a file from allowed directories (configs\\ or data\\).
         """
         self._log("action", f"READ: {filepath}")
         allowed_prefixes = [self.config_dir, os.path.join(self.default_dir, 'configs'), self.data_dir]
@@ -339,7 +389,7 @@ In order to execute the script, you may use one of two cases. The first case is 
 
     def _action_write_file(self, content: dict):
         """
-        Write JSON data to a file in allowed directories (configs/ or data/).
+        Write JSON data to a file in allowed directories (configs\\ or data\\).
         """
         self._log("action", f"WRITE file with content: {json.dumps(content, indent=2)}")
         if not isinstance(content, dict):
@@ -375,10 +425,11 @@ In order to execute the script, you may use one of two cases. The first case is 
         """
         Parse the run command to extract the script and config file.
         Expected format:
-            py <scripts_dir>\\<script_name>.py --config <config_file> [--output-dir <output_directory>]
+            py experiment_scripts\\<script_name>.py --config <config_file> [--output-dir <output_directory>]
         where <script_name> is one of ESR, find_nv, galvo_scan, or optimize.
         """
-        pattern = fr"py\s+(?P<path>{re.escape(self.scripts_dir)}[\\/](ESR\.py|find_nv\.py|galvo_scan\.py|optimize\.py))\s+--config\s+(?P<config>[\w\\./-]+)(?:\s+--output-dir\s+(?P<output_dir>[\w\\./-]+))?"
+        # More flexible pattern to handle different path formats and whitespace variations
+        pattern = r"py\s+(?P<path>(?:projects[\\/])?(?:experiment_scripts|NVExperiment[\\/]scripts)[\\/](ESR\.py|find_nv\.py|galvo_scan\.py|optimize\.py))\s+--config\s+(?P<config>[\w\\./-]+)(?:\s+--output-dir\s+(?P<output_dir>[\w\\./-]+))?"
         m = re.search(pattern, command)
         if m:
             result = {"script": m.group("path"), "config": m.group("config")}
@@ -386,12 +437,15 @@ In order to execute the script, you may use one of two cases. The first case is 
                 result["output_dir"] = m.group("output_dir")
             return result
         else:
-            raise ValueError("Run command parsing error: command must be in the format: py experiment_scripts\\<script_name>.py --config <config_file> [--output-dir <output_directory>]")
+            # More informative error message that includes the command that failed to parse
+            allowed_scripts = "ESR.py, find_nv.py, galvo_scan.py, or optimize.py"
+            error_msg = f"Run command parsing error for command: '{command}'. \nCommand must be in the format: py experiment_scripts/<script_name>.py --config <config_file> [--output-dir <output_directory>] \nwhere <script_name> is one of {allowed_scripts}"
+            raise ValueError(error_msg)
 
 
     def _action_run_command(self, command: str):
         """
-        Run a shell command (only if in 'scripts/' directory and is one of the allowed scripts), capturing output.
+        Run a shell command (only if in 'scripts\\' directory and is one of the allowed scripts), capturing output.
         """
         self._log("action", f"RUN: {command}")
         try:
@@ -399,14 +453,15 @@ In order to execute the script, you may use one of two cases. The first case is 
             allowed_scripts = [f"{self.default_dir}\\scripts\\ESR.py", f"{self.default_dir}\\scripts\\find_nv.py", 
                                f"{self.default_dir}\\scripts\\galvo_scan.py", f"{self.default_dir}\\scripts\\optimize.py"]
             script_normalized = parsed["script"].replace("/", "\\")
+
             if script_normalized not in allowed_scripts:
                 raise ValueError("Command not allowed: script not among allowed options.")
             
-            # Add output directory parameter if not already specified
-            if "output_dir" not in parsed:
-                # Append the data directory to the command
-                command = f"{command} --output-dir {self.data_dir}"
-                self._log("action", f"Modified command with output directory: {command}")
+            # Ensure the data directory exists
+            os.makedirs(self.data_dir, exist_ok=True)
+            
+            # Log the command as is - the agent should have included the output directory
+            self._log("action", f"Running command: {command}")
             
             result = subprocess.run(command, shell=True, check=True, capture_output=True)
             stdout_text = result.stdout.decode()
@@ -435,15 +490,33 @@ In order to execute the script, you may use one of two cases. The first case is 
 
     def _action_vision(self, filepath: str):
         """
-        Analyze a plot image from the data/ directory using the vision model, including conversation context.
+        Analyze a plot image from the data\\ directory using the vision model, including conversation context.
         """
         self._log("action", f"VISION: {filepath}")
+        
+        # Handle both absolute paths and relative paths
+        if not os.path.isabs(filepath):
+            # If it's just a filename, assume it's in the current run's data directory
+            if os.path.basename(filepath) == filepath:
+                filepath = os.path.join(self.data_dir, filepath)
+            # If it starts with 'projects/data/' or similar patterns, convert to the correct path
+            elif any(filepath.startswith(prefix) for prefix in ['projects/data/', 'projects\\data\\', 'data/', 'data\\']):
+                plot_filename = os.path.basename(filepath)
+                filepath = os.path.join(self.data_dir, plot_filename)
+            # Handle paths that might be in the format projects/NVExperiment/runs/run_*/data/
+            elif 'NVExperiment/runs/' in filepath.replace('\\', '/') or 'data' in filepath:
+                # Try to extract just the filename if it's a complex path
+                plot_filename = os.path.basename(filepath)
+                filepath = os.path.join(self.data_dir, plot_filename)
+        
+        # Check if the file is in the allowed data directory
         if not filepath.startswith(self.data_dir):
-            msg = f"[System] VISION denied: {filepath} is not in the allowed data directory."
+            msg = f"[System] VISION denied: {filepath} is not in the allowed data directory ({self.data_dir})."
             print(msg)
             self._log("action", msg)
             self.conversation_history.append({"role": "assistant", "content": msg})
             return
+            
         if not os.path.exists(filepath):
             msg = f"[System] File not found: {filepath}"
             print(msg)
@@ -457,16 +530,303 @@ In order to execute the script, you may use one of two cases. The first case is 
         print(msg)
         self._log("action", msg)
         self.conversation_history.append({"role": "assistant", "content": msg})
+    
+    def _get_available_plots(self):
+        """
+        Scan the data directory for plot files and return their paths.
         
+        Returns:
+            List of plot file paths
+        """
+        plot_files = []
+        if os.path.exists(self.data_dir):
+            for filename in os.listdir(self.data_dir):
+                if filename.endswith('.png') and any(plot_type in filename for plot_type in 
+                                                  ['ESR', 'FindNV', 'GalvoScan', 'Optimization']):
+                    plot_files.append(os.path.join(self.data_dir, filename))
+        return plot_files
+    
+    def _get_relevant_plots(self, query):
+        """
+        Check if there are any plots in the data directory that might be relevant to the query.
+        
+        Args:
+            query: The user's query
+            
+        Returns:
+            List of relevant plot paths
+        """
+        relevant_plots = []
+        
+        # Define keywords for each plot type
+        plot_keywords = {
+            'ESR': ['esr', 'electron spin resonance', 'frequency', 'spectrum'],
+            'FindNV': ['findnv', 'find nv', 'nv center', 'diamond', 'locate'],
+            'GalvoScan': ['galvoscan', 'galvo', 'scan', 'mapping', 'surface'],
+            'Optimization': ['optimize', 'optimization', 'parameter', 'tuning']
+        }
+        
+        # Check if any keywords are in the query
+        query_lower = query.lower()
+        matching_types = []
+        for plot_type, keywords in plot_keywords.items():
+            if any(keyword in query_lower for keyword in keywords):
+                matching_types.append(plot_type)
+        
+        # Get all plots in the data directory
+        available_plots = self._get_available_plots()
+        
+        # Filter for relevant plots
+        for plot_path in available_plots:
+            plot_filename = os.path.basename(plot_path)
+            if any(plot_type in plot_filename for plot_type in matching_types) or not matching_types:
+                relevant_plots.append(plot_path)
+        
+        return relevant_plots
+    
+    def _track_analyzed_plots(self):
+        """
+        Track which plots have been analyzed in the current session.
+        
+        Returns:
+            Dictionary mapping plot filenames to their analysis status
+        """
+        analyzed_plots = {}
+        
+        # Get all plots in the data directory
+        available_plots = self._get_available_plots()
+        for plot_path in available_plots:
+            plot_filename = os.path.basename(plot_path)
+            analyzed_plots[plot_filename] = False
+        
+        # Check which plots have been analyzed
+        for turn in self.conversation_history:
+            if "VISION:" in turn.get("content", ""):
+                plot_path = turn["content"].split("VISION:")[1].strip()
+                plot_filename = os.path.basename(plot_path)
+                if plot_filename in analyzed_plots:
+                    analyzed_plots[plot_filename] = True
+        
+        return analyzed_plots
+    
+    def _suggest_unanalyzed_plots(self):
+        """
+        Suggest plots that haven't been analyzed yet.
+        
+        Returns:
+            List of unanalyzed plot paths
+        """
+        analyzed_plots = self._track_analyzed_plots()
+        unanalyzed_plots = []
+        
+        for plot_filename, analyzed in analyzed_plots.items():
+            if not analyzed:
+                unanalyzed_plots.append(os.path.join(self.data_dir, plot_filename))
+        
+        return unanalyzed_plots
+    
+    def _get_rag_context(self, query, top_k=3):
+        """
+        Retrieve relevant context from previous conversations using RAG.
+        Highlight any plot references in the retrieved context.
+        
+        Args:
+            query: The user's query to search against
+            top_k: Number of most relevant contexts to retrieve
+            
+        Returns:
+            String containing the most relevant contexts with plot references highlighted
+        """
+        # Check if embeddings directory exists and has files
+        if not os.path.exists(self.embeddings_dir):
+            print(f"[RAG] Embeddings directory {self.embeddings_dir} does not exist")
+            return ""
+            
+        # Load all embeddings from the embeddings directory
+        embeddings_files = [os.path.join(self.embeddings_dir, f) 
+                            for f in os.listdir(self.embeddings_dir) 
+                            if f.endswith('.json')]
+        
+        if not embeddings_files:
+            print(f"[RAG] No embedding files found in {self.embeddings_dir}")
+            return ""
+        
+        print(f"[RAG] Found {len(embeddings_files)} embedding files to search")
+        self._log("rag", f"Searching {len(embeddings_files)} embedding files for query: {query}")
+        
+        # Search for similar contexts across all embedding files
+        results = []
+        for embedding_file in embeddings_files:
+            try:
+                print(f"[RAG] Searching file: {os.path.basename(embedding_file)}")
+                similar_contexts = search_similar(query, embedding_file, top_k=top_k)
+                if similar_contexts:
+                    print(f"[RAG] Found {len(similar_contexts)} relevant contexts in {os.path.basename(embedding_file)}")
+                    results.extend(similar_contexts)
+                else:
+                    print(f"[RAG] No relevant contexts found in {os.path.basename(embedding_file)}")
+            except Exception as e:
+                print(f"[RAG] Error searching embeddings file {embedding_file}: {str(e)}")
+                self._log("rag", f"Error searching embeddings file {embedding_file}: {str(e)}")
+        
+        # Sort by similarity score and take top_k
+        results.sort(key=lambda x: x["score"], reverse=True)
+        results = results[:top_k]
+        
+        # Format the results
+        if not results:
+            print(f"[RAG] No relevant contexts found after searching all embedding files")
+            return ""
+        
+        print(f"[RAG] Found {len(results)} relevant contexts after filtering by similarity")
+        
+        context_text = []
+        for i, result in enumerate(results):
+            # Check if the result contains plot references
+            text = result["text"]
+            plot_references = result.get("plot_references", [])
+            
+            # Log the result
+            print(f"[RAG] Context {i+1}/{len(results)}: Similarity score {result['score']:.2f}")
+            if plot_references:
+                print(f"[RAG] Context {i+1} contains {len(plot_references)} plot references")
+            
+            # Add the context with plot references highlighted
+            context_entry = f"Context (similarity: {result['score']:.2f}):\n{text}"
+            if plot_references:
+                context_entry += "\n\nRelevant plot references:\n" + "\n".join(plot_references)
+            
+            context_text.append(context_entry)
+        
+        return "\n\n".join(context_text)
+    
+    def save_conversation_embeddings(self):
+        """
+        Embed the entire conversation history and save to the embeddings directory.
+        Also include references to any plots that were analyzed.
+        """
+        if not self.conversation_history:
+            print("[Embeddings] No conversation history to save")
+            return
+        
+        print(f"[Embeddings] Preparing to save conversation with {len(self.conversation_history)} turns")
+        self._log("embeddings", f"Saving conversation with {len(self.conversation_history)} turns")
+        
+        # Format conversation for embedding
+        conversation_text = []
+        
+        # Track which plots have been analyzed in this conversation
+        analyzed_plots = set()
+        
+        # Count message types for logging
+        user_messages = 0
+        assistant_messages = 0
+        vision_analyses = 0
+        
+        for turn in self.conversation_history:
+            role = turn["role"]
+            content = turn["content"]
+            conversation_text.append(f"{role}: {content}")
+            
+            # Count message types
+            if role == "user":
+                user_messages += 1
+            elif role == "assistant":
+                assistant_messages += 1
+            
+            # Check if this is a vision analysis result
+            if role == "assistant" and "[System] Vision analysis result:" in content:
+                vision_analyses += 1
+                # Extract the plot filename from previous messages
+                for i in range(len(self.conversation_history)):
+                    if (i < len(self.conversation_history) - 1 and 
+                        "VISION:" in self.conversation_history[i].get("content", "")):
+                        plot_path = self.conversation_history[i]["content"].split("VISION:")[1].strip()
+                        plot_filename = os.path.basename(plot_path)
+                        analyzed_plots.add(plot_filename)
+        
+        print(f"[Embeddings] Conversation summary: {user_messages} user messages, {assistant_messages} assistant responses, {vision_analyses} vision analyses")
+        
+        # Add references to all plots in the data directory
+        available_plots = self._get_available_plots()
+        if available_plots:
+            print(f"[Embeddings] Including {len(available_plots)} plots in embedding data")
+            conversation_text.append("\nAvailable plots in this session:")
+            for plot_path in available_plots:
+                plot_filename = os.path.basename(plot_path)
+                status = "Analyzed" if plot_filename in analyzed_plots else "Not analyzed"
+                conversation_text.append(f"- {plot_filename} ({status}): {plot_path}")
+        else:
+            print("[Embeddings] No plots available to include in embedding data")
+        
+        # Join all turns with newlines
+        full_text = "\n".join(conversation_text)
+        
+        # Generate a timestamp for the embedding file
+        timestamp = self._current_timestamp_for_filename()
+        embedding_file = os.path.join(self.embeddings_dir, f"conversation_{timestamp}.json")
+        
+        # Save the embeddings
+        try:
+            # Count existing embedding files before saving
+            existing_files = [f for f in os.listdir(self.embeddings_dir) if f.endswith('.json')]
+            print(f"[Embeddings] Current embedding files count: {len(existing_files)}")
+            
+            # Save the new embeddings
+            save_embeddings(full_text, embedding_file)
+            
+            # Verify the file was created
+            if os.path.exists(embedding_file):
+                print(f"[Embeddings] Successfully saved conversation to {embedding_file}")
+                self._log("embeddings", f"Successfully saved conversation to {embedding_file}")
+                
+                # Count embedding files after saving to confirm a new one was added
+                updated_files = [f for f in os.listdir(self.embeddings_dir) if f.endswith('.json')]
+                print(f"[Embeddings] Updated embedding files count: {len(updated_files)}")
+                if len(updated_files) > len(existing_files):
+                    print("[Embeddings] Confirmed: New embedding file was created")
+                else:
+                    print("[Embeddings] Warning: No new embedding file was created")
+            else:
+                print(f"[Embeddings] Warning: Failed to verify creation of {embedding_file}")
+        except Exception as e:
+            print(f"[Embeddings] Error saving embeddings: {str(e)}")
+            self._log("embeddings", f"Error saving embeddings: {str(e)}")
+
 
 if __name__ == "__main__":
     agent = NVExperimentAgent()
     print("=== NV Experiment Agent CLI ===")
     print("Type 'exit' to quit.\n")
-    while True:
-        user_in = input("You: ")
-        if user_in.lower() in ["quit", "exit"]:
-            print("Goodbye!")
-            break
-        agent.handle_user_input(user_in)
+    
+    # Print information about the embeddings directory
+    print(f"[Embeddings] Using embeddings directory: {agent.embeddings_dir}")
+    if os.path.exists(agent.embeddings_dir):
+        existing_files = [f for f in os.listdir(agent.embeddings_dir) if f.endswith('.json')]
+        print(f"[Embeddings] Found {len(existing_files)} existing embedding files")
+    else:
+        print(f"[Embeddings] Creating new embeddings directory")
+        os.makedirs(agent.embeddings_dir, exist_ok=True)
+    
+    try:
+        while True:
+            user_in = input("You: ")
+            if user_in.lower() in ["quit", "exit"]:
+                print("\n[Embeddings] Saving conversation embeddings and plot metadata before exit...")
+                agent.save_conversation_embeddings()
+                print("Goodbye!")
+                break
+            agent.handle_user_input(user_in)
+    except KeyboardInterrupt:
+        print("\n\n[Embeddings] Detected keyboard interrupt. Saving conversation embeddings before exit...")
+        agent.save_conversation_embeddings()
+        print("Goodbye!")
+    except Exception as e:
+        print(f"\n\n[Error] An unexpected error occurred: {str(e)}")
+        print("[Embeddings] Attempting to save conversation embeddings before exit...")
+        try:
+            agent.save_conversation_embeddings()
+        except Exception as save_error:
+            print(f"[Embeddings] Failed to save embeddings: {str(save_error)}")
+        print("Goodbye!")
 

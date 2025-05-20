@@ -59,3 +59,8 @@ PROBLEM -- different OS = different filepath convention
 ## set sail?!
 Refer to "This will lend itself..." for next big step.
 ReAct prompting? -- could be good to daisy-chain together data, especially with the structured database, chaining experiments, etc.
+
+
+## 2025 May 20
+- Single agent: RAG as a tool, use RAG when trigger happends
+- Seperate agents to handle RAG, input: recent messages, retive RAG; output: context based on RAG
