@@ -1,0 +1,7 @@
+.vscode
+b26_toolkit_for_agent/
+data/
+.env
+venv/
+.DS_Store
+__pycache__/
