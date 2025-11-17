@@ -30,6 +30,24 @@ from KG.providers import get_embedding_client, get_embedding_model
 _embedding_client = get_embedding_client()
 _EMBEDDING_MODEL = get_embedding_model()
 
+
+def _log_to_file(log_file_path: str, role: str, content: str) -> None:
+    """
+    Log a message to the log file in the same format as agent.py's _log method.
+    
+    Args:
+        log_file_path: Path to the log file
+        role: Role/category of the log entry (e.g., "db_kg", "action", "rag")
+        content: Content to log
+    """
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{ts}] {role.upper()}: {content}\n"
+        with open(log_file_path, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception as e:
+        print(f"[DB/KG] Warning: Failed to log to file: {e}")
+
 # --- Lazy singletons used by save/search ---
 _INITIALIZED = False
 _chunker = None
@@ -250,7 +268,7 @@ async def _save_conv_to_db_kg_only(conversation_history: List[Dict[str, str]], l
         # Skip system prompts and thinking blocks
         if role == "system":
             continue
-        if role == "assistant" and content.startswith("(THINK)"):
+        if role == "assistant" and content.upper().startswith("(THINK)"):
             continue
         if role == "assistant" and "[Agent] WRITE DENIED" in content:
             continue
@@ -259,6 +277,11 @@ async def _save_conv_to_db_kg_only(conversation_history: List[Dict[str, str]], l
         if role == "assistant" and "[Agent] VISION DENIED" in content:
             continue
         if role == "assistant" and "[Agent] Unknown action" in content:
+            continue
+        # Filter out file read operations and related system messages
+        if role == "assistant" and "[System] READ denied:" in content:
+            continue
+        if role == "assistant" and "[System] File not found:" in content:
             continue
             
         filtered_conversation.append(turn)
@@ -401,7 +424,7 @@ async def _summarize_log_file(log_file_path: str) -> str:
                 Log chunk:
                 {chunk.content}
                 
-                Provide a concise summary (max 50 words):
+                Provide a concise summary (max 500 words):
                 """
                 
                 # DEBUG: Using dummy placeholder instead of actual LLM call
@@ -411,7 +434,7 @@ async def _summarize_log_file(log_file_path: str) -> str:
                 #         {"role": "system", "content": "You are a helpful assistant that summarizes log file chunks concisely. Keep summaries under 50 words."},
                 #         {"role": "user", "content": summary_prompt}
                 #     ],
-                #     max_tokens=50,
+                #     max_tokens=500,
                 #     temperature=0.3
                 # )
                 
@@ -434,6 +457,9 @@ async def _summarize_log_file(log_file_path: str) -> str:
         # Combine chunk summaries into final summary
         if chunk_summaries:
             combined_summaries = "\n".join(chunk_summaries)
+            
+            # Log combined summaries to the log file
+            _log_to_file(log_file_path, "db_kg", f"Combined chunk summaries:\n{combined_summaries}")
             
             # Create final summary of all chunks
             final_prompt = f"""

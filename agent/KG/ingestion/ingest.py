@@ -1,5 +1,6 @@
 """
 Main ingestion script for processing markdown documents into vector DB and knowledge graph.
+more flexible pipeline for ingestion with different configurations. see the bottom for usage.
 """
 
 import os
